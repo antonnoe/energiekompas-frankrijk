@@ -414,7 +414,7 @@
       return {
         heatKwh,
         heatMainKwh: heatKwhMain,
-        heatAuxKwh,
+        heatKwhAux,
         H, Hvent, Htr, ach, vol, hdd,
         mainCost,
         auxCost,
