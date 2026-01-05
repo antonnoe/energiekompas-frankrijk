@@ -1,22 +1,12 @@
 // script.js
-/* Energiekompas Frankrijk (MVP)
-   - Doel: extreem laagdrempelig, niet-overweldigend
-   - Flow:
-     1) Adres (BAN) óf Regio (klimaatzone) -> context
-     2) Snelle invoer: m², bouwperiode, aanwezigheidprofiel, verbruiksslider, verwarmingsbron
-     3) Resultaat: kosten + grootste verbeterknop
-     4) Scenariomodus (wow): Baseline vs Scenario
-*/
-
 (function () {
   const { useEffect, useMemo, useRef, useState } = React;
 
-  // -----------------------------
-  // House constants / assumptions
-  // -----------------------------
+  const TOOL_NAME = "Energiekompas Frankrijk";
+  const TOOL_VERSION = "v2.0";
   const BRAND = "#800000";
 
-  // Klimaatzones (zelfde als uw bestaande model; HDD indicatief)
+  // ---- Klimaatzones (label + indicatieve HDD) ----
   const ZONES = [
     { id: "med", name: "Méditerranée (zacht)", hdd: 1400 },
     { id: "ouest", name: "Zuid-West / Atlantisch", hdd: 1900 },
@@ -26,15 +16,14 @@
     { id: "mont", name: "Bergen (koel)", hdd: 3400 },
   ];
 
-  // Aanwezigheidsprofielen (geen dagen/jaar tonen)
+  // ---- Aanwezigheidsprofielen ----
   const PRESENCE = [
     { key: "high", label: "Veel", factor: 1.00 },
     { key: "mid", label: "Gemiddeld", factor: 0.85 },
     { key: "low", label: "Weinig", factor: 0.70 },
   ];
 
-  // Bouwperiode -> globale warmteverliesfactor (zeer grof; Expert later)
-  // factor vertaalt m² + HDD naar warmtevraag bandbreedte.
+  // ---- Bouwperiode -> warmtefactor (grof; bewust indicatief) ----
   const BUILD = [
     { key: "pre1948", label: "Voor 1948", heatFactor: 0.085 },
     { key: "1948_1974", label: "1948–1974", heatFactor: 0.075 },
@@ -44,7 +33,7 @@
     { key: "2013plus", label: "2013+", heatFactor: 0.035 },
   ];
 
-  // Verwarming (vereenvoudigd)
+  // ---- Verwarming (vereenvoudigd) ----
   const HEAT = [
     { key: "hp", label: "Warmtepomp", scop: 3.2, energy: "elec" },
     { key: "elec", label: "Elektrisch (direct)", scop: 1.0, energy: "elec" },
@@ -55,7 +44,7 @@
     { key: "propaan", label: "Propaan", eta: 0.90, energy: "propaan" },
   ];
 
-  // Energieprijzen (default; gebruiker kan later uitbreiden)
+  // ---- Energieprijzen (defaults; later uitbreidbaar) ----
   const PRICE = {
     elec: 0.25,     // €/kWh
     gas: 1.20,      // €/m³ (≈ 10 kWh)
@@ -74,39 +63,55 @@
     propaan: 7.1,
   };
 
-  // Totale verbruiksslider: extra elektra bovenop basis (apparaten + warm water + evt. koken)
-  // (MVP: zeer simpel; later detail)
+  // ---- Totale verbruiksslider (apparaten + warm water + overig) ----
   const SLIDER = { min: 1500, max: 9000, step: 100 };
 
-  // BAN (Base Adresse Nationale) autocomplete
-  // NB: endpoint is stabiel in de praktijk, maar u kunt later upgraden/aanpassen.
+  // ---- BAN autocomplete ----
   const BAN_ENDPOINT = "https://api-adresse.data.gouv.fr/search/";
 
-  // -----------------------------
-  // Helpers
-  // -----------------------------
+  // ---- Helpers ----
   function clamp(n, a, b) { return Math.max(a, Math.min(b, n)); }
   function round(n) { return Math.round(n); }
   function moneyEUR(v) {
     const n = Number.isFinite(v) ? v : 0;
     return n.toLocaleString("nl-NL", { style: "currency", currency: "EUR", maximumFractionDigits: 0 });
   }
-  function fmt1(v) { return (Number.isFinite(v) ? v : 0).toFixed(1); }
-
-  function pickZoneByPostal(cp) {
-    // MVP: eenvoudige heuristiek (u kunt later INSEE/geo koppelen).
-    // Zonder externe geo: we laten BAN adres de keuze tonen, maar vragen zone expliciet bij twijfel.
-    // Hier dus: return null => gebruiker kiest.
-    return null;
+  function todayNL() {
+    const d = new Date();
+    return d.toLocaleDateString("nl-NL", { year: "numeric", month: "long", day: "numeric" });
   }
 
+  // ---- Postcode -> departement (incl. Corsica 20xxx) ----
+  function zoneFromPostalCode(cp) {
+    if (!cp || !/^\d{5}$/.test(cp)) return null;
+    const dep2 = cp.slice(0, 2);
+    if (dep2 === "20") return "med"; // Corsica
+    const dep = dep2;
+
+    // Mediterranée
+    if (["04","05","06","11","13","30","34","66","83","84"].includes(dep)) return "med";
+
+    // Atlantisch / Zuid-West
+    if (["16","17","24","33","40","47","64","79","85","86","87","44","56","29","22","35","49","50","14"].includes(dep)) return "ouest";
+
+    // Bergen (grof)
+    if (["09","12","15","19","31","32","38","42","43","46","48","63","65","73","74"].includes(dep)) return "mont";
+
+    // Oost (grof)
+    if (["08","10","51","52","54","55","57","67","68","88","90","25","39","70","71","21"].includes(dep)) return "est";
+
+    // Parijs/Noord (Île-de-France + noordelijke band grof)
+    if (["75","77","78","91","92","93","94","95","59","62","60","80","02","51"].includes(dep)) return "paris";
+
+    // Default
+    return "centre";
+  }
+
+  // ---- Warmtevraag (indicatief) ----
   function computeHeatKwh({ m2, zoneId, buildKey, presenceKey }) {
     const z = ZONES.find(x => x.id === zoneId) || ZONES[2];
     const b = BUILD.find(x => x.key === buildKey) || BUILD[2];
     const p = PRESENCE.find(x => x.key === presenceKey) || PRESENCE[1];
-
-    // Warmtevraag (indicatief): kWh ≈ m² * HDD * heatFactor * presenceFactor
-    // heatFactor is een empirische schaal om “realistische orde van grootte” te geven.
     return m2 * z.hdd * b.heatFactor * p.factor;
   }
 
@@ -116,95 +121,150 @@
     const price = prices[unit];
     const kwhPerUnit = KWH_PER_UNIT[unit];
 
-    // Input energie in kWh-equivalent (brandstofenergie of elektra)
     let inputKwh;
     if (h.key === "hp") inputKwh = heatKwh / (h.scop || 3.2);
     else if (h.key === "elec") inputKwh = heatKwh;
     else inputKwh = heatKwh / (h.eta || 0.90);
 
-    // Omrekenen naar “eenheden” voor prijs (m³/L/kg/stère)
     const units = inputKwh / kwhPerUnit;
     const cost = units * price;
-
     return { inputKwh, units, unit, cost };
   }
 
-  function biggestImprovement({ base, scenario }) {
-    // base/scenario hebben totalCost, heatCost, elecCost
-    const delta = base.totalCost - scenario.totalCost;
-    const heatDelta = base.heatCost - scenario.heatCost;
-    const elecDelta = base.elecCost - scenario.elecCost;
+  // ---- DPE: indicatieve letter + band (bewust: positionering, geen claim) ----
+  // We gebruiken een simpele intensiteit (kWh/m²/jaar proxy) uit modelresultaten.
+  // Let op: dit is geen officiële DPE-methode, enkel "waarschijnlijke positie".
+  const DPE_LETTERS = ["A","B","C","D","E","F","G"];
 
-    const candidates = [
-      { key: "insul", label: "Isolatiepakket (dak/muren/ramen)", delta: heatDelta * 0.45 }, // proxy
-      { key: "hp", label: "Warmtepomp i.p.v. direct elektrisch / oude ketel", delta: heatDelta * 0.35 }, // proxy
-      { key: "pv", label: "Zonnepanelen (klein systeem)", delta: elecDelta * 0.25 }, // proxy
-    ].sort((a, b) => b.delta - a.delta);
-
-    const best = candidates[0];
-    if (!best || best.delta < 60) {
-      return { label: "Eerst: verfijn de basisgegevens (m², bouwperiode, verwarming)", saving: 0 };
-    }
-    return { label: best.label, saving: best.delta };
+  function dpeFromIntensity(intensity) {
+    // grenzen geïnspireerd op het bekende A..G patroon, maar dit blijft indicatief
+    // A < 70, B < 110, C < 180, D < 250, E < 330, F < 420, G >= 420
+    if (intensity < 70) return 0;
+    if (intensity < 110) return 1;
+    if (intensity < 180) return 2;
+    if (intensity < 250) return 3;
+    if (intensity < 330) return 4;
+    if (intensity < 420) return 5;
+    return 6;
   }
 
-  // Scenario-presets (wow toggle): we veranderen alleen parameters
-  function applyScenarioPreset(state, presetKey) {
-    // We blijven in MVP bewust “sober”: één knop -> duidelijke sprong
-    // In latere versie: meerdere scenario’s + investeringskosten.
-    const s = { ...state };
+  function buildAdvice({ heatKey, buildKey, presenceKey, zoneId, m2 }) {
+    // Twee sporen: besparing & DPE-optimalisering
+    // Quick wins: altijd; structureel: afhankelijk van bouwperiode/verwarming
+    const bIdx = BUILD.findIndex(x => x.key === buildKey);
+    const heat = HEAT.find(x => x.key === heatKey) || HEAT[0];
 
-    if (presetKey === "comfort") {
-      // “Comfort & zuinig”: betere warmtefactor + aanwezigheid iets hoger (thuis meer)
-      s.buildKey = s.buildKey; // bouwperiode blijft; we nemen isolatie-effect via factor later
-      s.sliderKwh = clamp(s.sliderKwh - 400, SLIDER.min, SLIDER.max);
-      s.heatKey = "hp";
-    }
+    const quick = [
+      "Instellingen optimaliseren (temperatuur, tijdschema, nachtverlaging waar passend).",
+      "Sluipverbruik beperken en verbruiksprofiel kalibreren (één totale slider).",
+      "Kleine kierdichting en eenvoudige verbeteringen (tocht, luiken, gordijnen)."
+    ];
 
-    if (presetKey === "renov") {
-      // “Renovatiepad”: reduceer warmtevraag door ‘virtual’ isolatie: we simuleren met virtuele bouwklasse + lagere warmtefactor
-      // We mappen naar 1 stap nieuwer (tot max) als proxy voor isolatieverbetering.
-      const idx = BUILD.findIndex(x => x.key === s.buildKey);
-      const newIdx = clamp(idx + 1, 0, BUILD.length - 1);
-      s.buildKey = BUILD[newIdx].key;
-      s.sliderKwh = clamp(s.sliderKwh - 300, SLIDER.min, SLIDER.max);
-    }
+    const structural = [];
+    if (bIdx <= 2) structural.push("Gebouwschil verbeteren: dak eerst, daarna muren/ramen (stap voor stap).");
+    else structural.push("Gerichte isolatie-upgrades op zwakke plekken (dak/ramen) indien nog niet op orde.");
+    if (heat.key === "elec") structural.push("Overweeg warmtepomp of hybride oplossing (comfort + kosten).");
+    if (heat.key === "fioul") structural.push("Vervang fioul op termijn (kosten, CO₂, toekomstbestendigheid).");
+    if (heat.key === "gas") structural.push("Optimaliseer ketelregeling of overweeg warmtepomp bij renovatie.");
+    if (structural.length === 0) structural.push("Structureel: focus op isolatie en regeltechniek, pas daarna op installaties.");
 
-    if (presetKey === "pv") {
-      // “PV-effect”: reduceer netto elektra (proxy) door 1200 kWh/jaar
-      s.sliderKwh = clamp(s.sliderKwh - 1200, SLIDER.min, SLIDER.max);
-    }
+    const dpe = [];
+    dpe.push("DPE-klasse verbetert meestal het snelst via de gebouwschil (dak/ramen/isolatielekken).");
+    dpe.push("Daarna: efficiëntere warmteopwekking (warmtepomp/ketelupgrade) en goede regeling.");
+    dpe.push("Let op: maatregelen die € besparen en maatregelen die de DPE-klasse verbeteren zijn niet altijd dezelfde.");
 
-    return s;
+    return { quick, structural, dpe };
   }
 
-  // -----------------------------
-  // Components
-  // -----------------------------
+  // ---- Kopieerbaar rapport (postcode-only) ----
+  function makeReport({ cp, zoneId, inputs, results, dpe, advice }) {
+    const zone = ZONES.find(z => z.id === zoneId)?.name || "—";
+    const build = BUILD.find(b => b.key === inputs.buildKey)?.label || "—";
+    const pres = PRESENCE.find(p => p.key === inputs.presenceKey)?.label || "—";
+    const heat = HEAT.find(h => h.key === inputs.heatKey)?.label || "—";
+
+    const lines = [];
+    lines.push(`${TOOL_NAME} – Samenvatting (indicatief)`);
+    lines.push(`Postcode: ${cp || "—"}`);
+    lines.push(`Datum: ${todayNL()}`);
+    lines.push(`Toolversie: ${TOOL_VERSION}`);
+    lines.push(``);
+    lines.push(`1) Woningprofiel (invoer)`);
+    lines.push(`- Woonoppervlak: ${inputs.m2} m²`);
+    lines.push(`- Bouwperiode: ${build}`);
+    lines.push(`- Aanwezigheid: ${pres}`);
+    lines.push(`- Verwarming: ${heat}`);
+    lines.push(`- Klimaatzone: ${zone} (automatisch bepaald op basis van postcode)`);
+    lines.push(`- Totale elektra (slider): ${inputs.sliderKwh} kWh/jaar`);
+    lines.push(``);
+    lines.push(`2) Resultaten (indicatief)`);
+    lines.push(`- Totale energiekosten: ${moneyEUR(results.totalCost)} / jaar`);
+    lines.push(`- Per maand: ${moneyEUR(results.perMonth)} / maand`);
+    lines.push(`- Warmtevraag: ${round(results.heatKwh)} kWh/jaar`);
+    lines.push(`- Elektra totaal: ${round(results.elecKwh)} kWh/jaar`);
+    lines.push(``);
+    lines.push(`3) Waarschijnlijke DPE-positie (context)`);
+    lines.push(`- Indicatieve DPE-klasse: ${dpe.letter}`);
+    lines.push(`- Bandbreedte: ${dpe.bandLow} – ${dpe.bandHigh}`);
+    lines.push(`Toelichting: deze inschatting combineert woningprofiel en regio (klimaat). Dit is geen officieel DPE-rapport.`);
+    lines.push(``);
+    lines.push(`4) Adviezen – twee sporen`);
+    lines.push(`A) Besparingskansen (comfort & kosten)`);
+    lines.push(`- Quick wins:`);
+    advice.quick.forEach(x => lines.push(`  • ${x}`));
+    lines.push(`- Structurele kansen:`);
+    advice.structural.forEach(x => lines.push(`  • ${x}`));
+    lines.push(``);
+    lines.push(`B) DPE-optimalisering (label & toekomst)`);
+    advice.dpe.forEach(x => lines.push(`  • ${x}`));
+    lines.push(``);
+    lines.push(`5) Grondslagen (samengevat)`);
+    lines.push(`- Postcode → klimaatzone (klimaat beïnvloedt warmtevraag).`);
+    lines.push(`- Warmtevraag (indicatief) → energie-input → kosten (met standaardprijzen).`);
+    lines.push(`- DPE-positie is een contextuele indicatie (geen officiële methode).`);
+    lines.push(``);
+    lines.push(`Disclaimer: Dit hulpmiddel is bedoeld voor inzicht en vergelijking en vervangt geen gecertificeerde DPE-audit of energie-audit.`);
+
+    return lines.join("\n");
+  }
+
+  async function copyToClipboard(text) {
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+        return true;
+      }
+      return false;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  // ---- Component ----
   function App() {
-    // Step 1: context
+    // context / BAN
     const [addressQuery, setAddressQuery] = useState("");
     const [banBusy, setBanBusy] = useState(false);
     const [banErr, setBanErr] = useState("");
     const [banHits, setBanHits] = useState([]);
-    const [selectedAddr, setSelectedAddr] = useState(null);
 
-    const [zoneId, setZoneId] = useState("paris"); // fallback
     const [cp, setCp] = useState("");
+    const [zoneId, setZoneId] = useState("paris");
+    const [zoneLocked, setZoneLocked] = useState(false);
 
-    // Step 2: quick inputs
+    // inputs
     const [m2, setM2] = useState(120);
     const [buildKey, setBuildKey] = useState("1975_1990");
     const [presenceKey, setPresenceKey] = useState("mid");
     const [sliderKwh, setSliderKwh] = useState(4200);
     const [heatKey, setHeatKey] = useState("hp");
 
-    // Prices (later editable; MVP fixed but in state)
-    const [prices] = useState({ ...PRICE });
+    const [showRegionTip, setShowRegionTip] = useState(false);
+    const [showGrounds, setShowGrounds] = useState(false);
 
-    // Wow toggle: scenario compare
-    const [scenarioOn, setScenarioOn] = useState(false);
-    const [scenarioPreset, setScenarioPreset] = useState("renov");
+    const [copyMsg, setCopyMsg] = useState("");
+
+    const [prices] = useState({ ...PRICE });
 
     const searchTimer = useRef(null);
 
@@ -229,7 +289,7 @@
           setBanBusy(false);
         } catch (e) {
           setBanBusy(false);
-          setBanErr("Adreszoeker tijdelijk niet beschikbaar. Kies dan een regio hieronder.");
+          setBanErr("Adreszoeker tijdelijk niet beschikbaar. Vul dan alleen de postcode in.");
         }
       }, 250);
 
@@ -238,58 +298,47 @@
       };
     }, [addressQuery]);
 
+    // postcode -> klimaatzone (auto), tenzij user zone expliciet lockt
+    useEffect(() => {
+      if (zoneLocked) return;
+      const z = zoneFromPostalCode(cp);
+      if (z && z !== zoneId) setZoneId(z);
+    }, [cp, zoneLocked, zoneId]);
+
     function onPickAddress(f) {
       const props = f?.properties || {};
       const label = props.label || "";
-      const postcode = props.postcode || "";
-      setSelectedAddr({ label, postcode });
-      setBanHits([]);
+      const postcode = (props.postcode || "").replace(/\D/g, "").slice(0, 5);
+
       setAddressQuery(label);
-      setCp(postcode || "");
-      const guessed = postcode ? pickZoneByPostal(postcode) : null;
-      if (guessed) setZoneId(guessed);
-      // Als geen guess: laat gebruiker zone kiezen; we tonen zone dropdown altijd, maar nu “ingevuld”
+      setBanHits([]);
+      setCp(postcode);
+      setZoneLocked(false);
     }
 
-    const contextReady = useMemo(() => {
-      return !!zoneId && Number.isFinite(m2) && m2 > 10;
-    }, [zoneId, m2]);
-
-    const baseState = useMemo(() => ({
+    const inputs = useMemo(() => ({
+      cp,
       zoneId,
       m2: clamp(Number(m2) || 0, 20, 600),
       buildKey,
       presenceKey,
       sliderKwh: clamp(Number(sliderKwh) || SLIDER.min, SLIDER.min, SLIDER.max),
       heatKey
-    }), [zoneId, m2, buildKey, presenceKey, sliderKwh, heatKey]);
+    }), [cp, zoneId, m2, buildKey, presenceKey, sliderKwh, heatKey]);
 
-    const scenarioState = useMemo(() => {
-      if (!scenarioOn) return null;
-      return applyScenarioPreset(baseState, scenarioPreset);
-    }, [scenarioOn, scenarioPreset, baseState]);
+    const results = useMemo(() => {
+      const heatKwh = computeHeatKwh(inputs);
+      const h = heatingInputAndCost({ heatKey: inputs.heatKey, heatKwh, prices });
 
-    const baseResults = useMemo(() => {
-      const heatKwh = computeHeatKwh(baseState);
-      const h = heatingInputAndCost({ heatKey: baseState.heatKey, heatKwh, prices });
-
-      // MVP: totale elektra = sliderKwh (apparaten/tapwater/overig) + (warmtepomp/direct) deel als elec
-      let elecKwh = baseState.sliderKwh;
-      if (baseState.heatKey === "hp" || baseState.heatKey === "elec") {
+      // totale elektra = slider + (warmtepomp/direct warmte-input)
+      let elecKwh = inputs.sliderKwh;
+      if (inputs.heatKey === "hp" || inputs.heatKey === "elec") {
         elecKwh += h.inputKwh;
       }
 
-      // Elektra kosten
       const elecCost = elecKwh * prices.elec;
-
-      // Warmtekosten:
-      // - bij elec/hp zit warmte al in elecCost, dus heatCost tonen als “0” en elders tonen we warmte input kWh
-      // - bij brandstoffen is heatCost apart
-      const heatCost = (baseState.heatKey === "hp" || baseState.heatKey === "elec") ? 0 : h.cost;
-
-      const totalCost = (baseState.heatKey === "hp" || baseState.heatKey === "elec")
-        ? elecCost
-        : elecCost + heatCost;
+      const heatCost = (inputs.heatKey === "hp" || inputs.heatKey === "elec") ? 0 : h.cost;
+      const totalCost = (inputs.heatKey === "hp" || inputs.heatKey === "elec") ? elecCost : elecCost + heatCost;
 
       return {
         heatKwh,
@@ -298,66 +347,102 @@
         elecCost,
         heatCost,
         totalCost,
-        perMonth: totalCost / 12
+        perMonth: totalCost / 12,
       };
-    }, [baseState, prices]);
+    }, [inputs, prices]);
 
-    const scenarioResults = useMemo(() => {
-      if (!scenarioState) return null;
+    const dpe = useMemo(() => {
+      // intensiteit proxy: (warmtevraag + elektra) per m²
+      // (bewust eenvoudig; doel: indicatieve positie)
+      const m2safe = Math.max(20, inputs.m2);
+      const intensity = (results.heatKwh + inputs.sliderKwh) / m2safe;
 
-      const heatKwh = computeHeatKwh(scenarioState);
-      const h = heatingInputAndCost({ heatKey: scenarioState.heatKey, heatKwh, prices });
+      const idx = dpeFromIntensity(intensity);
+      const letter = DPE_LETTERS[idx];
 
-      let elecKwh = scenarioState.sliderKwh;
-      if (scenarioState.heatKey === "hp" || scenarioState.heatKey === "elec") {
-        elecKwh += h.inputKwh;
-      }
-
-      const elecCost = elecKwh * prices.elec;
-      const heatCost = (scenarioState.heatKey === "hp" || scenarioState.heatKey === "elec") ? 0 : h.cost;
-      const totalCost = (scenarioState.heatKey === "hp" || scenarioState.heatKey === "elec")
-        ? elecCost
-        : elecCost + heatCost;
+      const lowIdx = clamp(idx - 1, 0, 6);
+      const highIdx = clamp(idx + 1, 0, 6);
 
       return {
-        heatKwh,
-        heatInputKwh: h.inputKwh,
-        elecKwh,
-        elecCost,
-        heatCost,
-        totalCost,
-        perMonth: totalCost / 12
+        idx,
+        letter,
+        bandLow: DPE_LETTERS[lowIdx],
+        bandHigh: DPE_LETTERS[highIdx],
+        intensity: Math.round(intensity)
       };
-    }, [scenarioState, prices]);
+    }, [results.heatKwh, inputs.sliderKwh, inputs.m2]);
 
-    const improvement = useMemo(() => {
-      if (!scenarioOn || !scenarioResults) {
-        // “Grootste verbeterknop” op basis van simpele heuristiek
-        // We maken een virtueel scenario: 1 stap betere bouwklasse + hp als grootste driver
-        const virt = applyScenarioPreset(baseState, "renov");
-        const heatKwh = computeHeatKwh(virt);
-        const h = heatingInputAndCost({ heatKey: virt.heatKey, heatKwh, prices });
+    const advice = useMemo(() => buildAdvice(inputs), [inputs]);
 
-        let elecKwh = virt.sliderKwh;
-        if (virt.heatKey === "hp" || virt.heatKey === "elec") elecKwh += h.inputKwh;
-        const elecCost = elecKwh * prices.elec;
-        const heatCost = (virt.heatKey === "hp" || virt.heatKey === "elec") ? 0 : h.cost;
-        const totalCost = (virt.heatKey === "hp" || virt.heatKey === "elec") ? elecCost : elecCost + heatCost;
+    const zoneName = useMemo(() => ZONES.find(z => z.id === zoneId)?.name || "—", [zoneId]);
 
-        const virtRes = { totalCost, heatCost, elecCost };
-        const baseResMini = { totalCost: baseResults.totalCost, heatCost: baseResults.heatCost, elecCost: baseResults.elecCost };
-        return biggestImprovement({ base: baseResMini, scenario: virtRes });
+    // DPE bar geometry
+    const dpePointerPct = useMemo(() => {
+      // center of segment
+      const segW = 100 / 7;
+      return (dpe.idx * segW) + (segW / 2);
+    }, [dpe.idx]);
+
+    const dpeBand = useMemo(() => {
+      const segW = 100 / 7;
+      const low = DPE_LETTERS.indexOf(dpe.bandLow);
+      const high = DPE_LETTERS.indexOf(dpe.bandHigh);
+      const left = (Math.min(low, high) * segW);
+      const right = ((Math.max(low, high) + 1) * segW);
+      return { left, width: Math.max(0, right - left) };
+    }, [dpe.bandLow, dpe.bandHigh]);
+
+    // V1 deep link (waarden meegeven via querystring; V1 kan dit later gaan lezen)
+    const v1Url = useMemo(() => {
+      const u = new URL("https://infofrankrijk.com/energieverbruik-en-warmteverliescalculator/");
+      if (cp) u.searchParams.set("cp", cp);
+      u.searchParams.set("zone", zoneId);
+      u.searchParams.set("m2", String(inputs.m2));
+      u.searchParams.set("build", buildKey);
+      u.searchParams.set("presence", presenceKey);
+      u.searchParams.set("heat", heatKey);
+      u.searchParams.set("kwh", String(inputs.sliderKwh));
+      return u.toString();
+    }, [cp, zoneId, inputs.m2, buildKey, presenceKey, heatKey, inputs.sliderKwh]);
+
+    async function onCopyReport() {
+      setCopyMsg("");
+      const report = makeReport({
+        cp,
+        zoneId,
+        inputs,
+        results,
+        dpe,
+        advice
+      });
+
+      const ok = await copyToClipboard(report);
+      if (ok) {
+        setCopyMsg("Gekopieerd. Plak dit in Word, Keep of e-mail.");
+        setTimeout(() => setCopyMsg(""), 3500);
+      } else {
+        setCopyMsg("Kopiëren lukt niet automatisch in deze browser. Selecteer en kopieer de tekst handmatig in ‘Grondslagen’.");
       }
+    }
 
-      const baseResMini = { totalCost: baseResults.totalCost, heatCost: baseResults.heatCost, elecCost: baseResults.elecCost };
-      const scResMini = { totalCost: scenarioResults.totalCost, heatCost: scenarioResults.heatCost, elecCost: scenarioResults.elecCost };
-      return biggestImprovement({ base: baseResMini, scenario: scResMini });
-    }, [scenarioOn, scenarioResults, baseResults, baseState, prices]);
+    function downloadTxt() {
+      const report = makeReport({ cp, zoneId, inputs, results, dpe, advice });
+      const blob = new Blob([report], { type: "text/plain;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `energiekompas_${cp || "postcode"}_${new Date().toISOString().slice(0,10)}.txt`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    }
 
-    // UI
+    // ---- UI ----
     return React.createElement(
       React.Fragment,
       null,
+
       React.createElement(
         "div",
         { className: "topbar" },
@@ -368,79 +453,74 @@
             "div",
             { className: "brandBadge" },
             React.createElement("div", { className: "dot" }),
-            React.createElement("div", { className: "brandTitle" }, "Energiekompas Frankrijk"),
-            React.createElement("span", { className: "pill" }, "MVP – Snel & overzichtelijk")
+            React.createElement("div", { className: "brandTitle" }, TOOL_NAME)
           ),
-          React.createElement(
-            "div",
-            { className: "pill" },
-            contextReady ? "Context: OK" : "Start met adres of regio"
-          )
+          React.createElement("span", { className: "pill" }, `${TOOL_VERSION}`)
         )
       ),
 
       React.createElement(
         "div",
         { className: "wrap" },
+
         React.createElement("h1", null, "Energiekompas Frankrijk"),
-        React.createElement(
-          "div",
-          { className: "kicker" },
-          "Eerst context (adres/regio), daarna pas rekenen. Geen overweldiging: alleen de kern."
+        React.createElement("div", { className: "kicker" },
+          "Context eerst (adres/postcode), daarna inzicht (kosten, waarschijnlijke DPE-positie) en adviezen. Indicatief hulpmiddel – geen gecertificeerde DPE-audit."
         ),
 
         React.createElement(
           "div",
           { className: "grid", style: { marginTop: 16 } },
 
-          // Left: inputs
+          // LEFT
           React.createElement(
             "div",
             { className: "card" },
+
             React.createElement(
               "div",
               { className: "sectionTitle" },
-              React.createElement("h2", null, "1) Context: adres of regio"),
-              React.createElement("span", { className: "badge badgeMuted" }, "Stap 1")
+              React.createElement("h2", null, "1) Context"),
+              React.createElement("span", { className: "pill" }, "Adres of postcode")
             ),
 
-            // Address search
             React.createElement(
               "div",
               { className: "field" },
-              React.createElement("label", null, "Adres (BAN)"),
+              React.createElement(
+                "label",
+                null,
+                "Adres (BAN, optioneel)"
+              ),
               React.createElement("input", {
                 className: "input",
                 value: addressQuery,
                 onChange: (e) => {
                   setAddressQuery(e.target.value || "");
-                  setSelectedAddr(null);
-                  setCp("");
+                  setBanHits([]);
                 },
-                placeholder: "Bijv. 12 rue de ... , 75008 Paris",
+                placeholder: "Bijv. Rue Sem 33100 Bordeaux",
                 "aria-label": "Adres zoeken"
               }),
-              React.createElement(
-                "div",
-                { className: "help" },
-                "Tip: als u geen exact adres weet, kies hieronder direct een klimaatzone."
+              React.createElement("div", { className: "help" },
+                "Als u geen exact adres heeft: vul alleen de postcode in. De klimaatzone wordt dan automatisch bepaald."
               )
             ),
 
-            banErr ? React.createElement("div", { className: "note", style: { color: "#b00020", fontWeight: 800 } }, banErr) : null,
-
-            banBusy ? React.createElement("div", { className: "note" }, "Zoeken…") : null,
+            banErr ? React.createElement("div", { className: "help", style: { color: "#b00020", fontWeight: 900 } }, banErr) : null,
+            banBusy ? React.createElement("div", { className: "help" }, "Zoeken…") : null,
 
             (banHits && banHits.length > 0) ? React.createElement(
               "div",
               { className: "suggestions" },
               banHits.map((f, idx) => {
                 const p = f.properties || {};
+                const pc = (p.postcode || "").toString();
                 return React.createElement(
                   "div",
                   { key: idx, className: "sugItem", onClick: () => onPickAddress(f) },
                   React.createElement("div", { className: "sugMain" }, p.label || "Onbekend adres"),
-                  React.createElement("div", { className: "sugSub" }, `Postcode: ${p.postcode || "—"} · Gemeente: ${p.city || "—"}`)
+                  React.createElement("div", { className: "sugSub" }, `Postcode: ${pc || "—"} · Gemeente: ${p.city || "—"}`)
                 );
               })
             ) : null,
@@ -451,37 +531,71 @@
               React.createElement(
                 "div",
                 { className: "field" },
-                React.createElement("label", null, "Postcode (auto bij adres)"),
+                React.createElement("label", null, "Postcode"),
                 React.createElement("input", {
                   className: "input",
                   value: cp,
-                  onChange: (e) => setCp((e.target.value || "").replace(/\D/g, "").slice(0, 5)),
-                  placeholder: "75008",
+                  onChange: (e) => {
+                    const v = (e.target.value || "").replace(/\D/g, "").slice(0, 5);
+                    setCp(v);
+                  },
+                  placeholder: "33100",
+                  inputMode: "numeric",
                   "aria-label": "Postcode"
                 }),
-                React.createElement("div", { className: "help" }, "Wordt gebruikt voor benchmark (later) en DPE-context (later).")
+                React.createElement("div", { className: "help" },
+                  "Postcode bepaalt automatisch de klimaatzone en wordt later gebruikt voor regionale benchmark."
+                )
               ),
               React.createElement(
                 "div",
                 { className: "field" },
-                React.createElement("label", null, "Klimaatzone"),
+                React.createElement(
+                  "label",
+                  null,
+                  "Klimaatzone",
+                  React.createElement("span", {
+                    className: "iconHelp",
+                    role: "button",
+                    tabIndex: 0,
+                    title: "Waarom speelt regio een rol?",
+                    onClick: () => setShowRegionTip(!showRegionTip)
+                  }, "?")
+                ),
                 React.createElement(
                   "select",
-                  { value: zoneId, onChange: (e) => setZoneId(e.target.value) },
+                  {
+                    value: zoneId,
+                    onChange: (e) => { setZoneId(e.target.value); setZoneLocked(true); }
+                  },
                   ZONES.map(z => React.createElement("option", { key: z.id, value: z.id }, z.name))
                 ),
-                React.createElement("div", { className: "help" }, "Altijd zichtbaar: u weet meteen in welke klimaatzone u rekent.")
+                React.createElement("div", { className: "help" },
+                  zoneLocked
+                    ? "U heeft de klimaatzone handmatig aangepast. Als u wilt: pas de postcode aan om weer automatisch te bepalen."
+                    : "Automatisch bepaald (op basis van postcode). U kunt dit aanpassen."
+                )
               )
             ),
 
+            showRegionTip ? React.createElement(
+              "div",
+              { className: "tipBox" },
+              React.createElement("b", null, "Waarom speelt regio een rol?"),
+              React.createElement("div", null,
+                "De DPE-methode houdt rekening met klimaatverschillen. In koudere regio’s is de warmtevraag structureel hoger dan in mildere regio’s. ",
+                "Daardoor kan dezelfde woning in een andere regio een andere (waarschijnlijke) DPE-positie hebben, zonder dat de woning zelf verandert. ",
+                "Deze tool gebruikt de klimaatzone als contextvariabele. Dit blijft indicatief en vervangt geen officieel DPE."
+              )
+            ) : null,
+
             React.createElement("div", { className: "hr" }),
 
-            // Quick inputs
             React.createElement(
               "div",
               { className: "sectionTitle" },
-              React.createElement("h2", null, "2) Snelle invoer (geen details)"),
-              React.createElement("span", { className: "badge badgeMuted" }, "Stap 2")
+              React.createElement("h2", null, "2) Woningprofiel (snel)"),
+              React.createElement("span", { className: "pill" }, "Geen details")
             ),
 
             React.createElement(
@@ -499,7 +613,7 @@
                   min: 20,
                   max: 600
                 }),
-                React.createElement("div", { className: "help" }, "Alleen m². Volume en U-waardes komen later in Expert.")
+                React.createElement("div", { className: "help" }, "Alleen m². U-waarden, volume en ventilatie komen pas in de uitgebreide analyse.")
               ),
               React.createElement(
                 "div",
@@ -509,8 +623,7 @@
                   "select",
                   { value: buildKey, onChange: (e) => setBuildKey(e.target.value) },
                   BUILD.map(b => React.createElement("option", { key: b.key, value: b.key }, b.label))
-                ),
-                React.createElement("div", { className: "help" }, "Bepaalt de startinschatting van warmteverlies (indicatief).")
+                )
               ),
               React.createElement(
                 "div",
@@ -520,8 +633,7 @@
                   "select",
                   { value: presenceKey, onChange: (e) => setPresenceKey(e.target.value) },
                   PRESENCE.map(p => React.createElement("option", { key: p.key, value: p.key }, p.label))
-                ),
-                React.createElement("div", { className: "help" }, "Geen dagen/jaar. Alleen een begrijpelijk profiel.")
+                )
               )
             ),
 
@@ -536,8 +648,7 @@
                   "select",
                   { value: heatKey, onChange: (e) => setHeatKey(e.target.value) },
                   HEAT.map(h => React.createElement("option", { key: h.key, value: h.key }, h.label))
-                ),
-                React.createElement("div", { className: "help" }, "In MVP rekenen we met redelijke standaard-SCOP/η (later verfijnbaar).")
+                )
               ),
               React.createElement(
                 "div",
@@ -563,170 +674,241 @@
                     React.createElement("span", null, `Hoog (${SLIDER.max} kWh)`)
                   )
                 ),
-                React.createElement("div", { className: "help" }, "Dit vervangt alle losse apparatenposten. Later kunt u verfijnen.")
+                React.createElement("div", { className: "help" },
+                  "Deze slider vervangt losse apparatenposten. In de uitgebreide analyse kunt u dit verfijnen (PV, EV, zwembad, airco, etc.)."
+                )
               )
             ),
 
             React.createElement("div", { className: "hr" }),
 
-            // Scenario toggle
             React.createElement(
               "div",
               { className: "sectionTitle" },
-              React.createElement("h2", null, "3) Wow: scenario-sprong"),
-              React.createElement("span", { className: "badge badgeMuted" }, "Optioneel")
+              React.createElement("h2", null, "3) Verdiepen"),
+              React.createElement("span", { className: "pill" }, "Uitgebreide analyse")
             ),
+
+            React.createElement("div", { className: "help" },
+              "Wilt u deze analyse uitbreiden met isolatie per bouwdeel, ventilatie, zonnepanelen, zwembad en meer scenario’s? Dan kunt u doorgaan naar de uitgebreide warmteverliescalculator. Basiswaarden worden meegegeven waar mogelijk."
+            ),
+
             React.createElement(
               "div",
-              { className: "row row2" },
+              { className: "btnRow" },
               React.createElement(
-                "div",
-                { className: "field" },
-                React.createElement("label", null, "Scenario vergelijken"),
-                React.createElement(
-                  "div",
-                  { className: "btnRow" },
-                  React.createElement("button", {
-                    className: "btn " + (scenarioOn ? "btnSoft" : ""),
-                    onClick: () => setScenarioOn(!scenarioOn)
-                  }, scenarioOn ? "Scenario: AAN" : "Scenario: UIT"),
-                  React.createElement("button", {
-                    className: "btn btnGhost",
-                    onClick: () => {
-                      setScenarioOn(true);
-                      setScenarioPreset("renov");
-                    }
-                  }, "Renovatiepad"),
-                  React.createElement("button", {
-                    className: "btn btnGhost",
-                    onClick: () => {
-                      setScenarioOn(true);
-                      setScenarioPreset("pv");
-                    }
-                  }, "PV-sprong"),
-                  React.createElement("button", {
-                    className: "btn btnGhost",
-                    onClick: () => {
-                      setScenarioOn(true);
-                      setScenarioPreset("comfort");
-                    }
-                  }, "Comfort & zuinig")
-                ),
-                React.createElement(
-                  "div",
-                  { className: "help" },
-                  "Dit is bewust simpel: één klik → zichtbaar effect. Later maken we investeringen en kosten expliciet."
-                )
-              ),
-              React.createElement(
-                "div",
-                { className: "field" },
-                React.createElement("label", null, "Let op"),
-                React.createElement(
-                  "div",
-                  { className: "note" },
-                  "MVP-resultaten zijn indicatief: gericht op oriëntatie (koper/eigenaar). Geen officieel DPE of audit."
-                )
+                "a",
+                { className: "btn btnGhost", href: v1Url, target: "_blank", rel: "noopener" },
+                "Open uitgebreide analyse (V1)"
               )
             )
           ),
 
-          // Right: Results
+          // RIGHT (sticky)
           React.createElement(
             "div",
-            { className: "cardWhite" },
+            { className: "stickyRight" },
             React.createElement(
               "div",
-              { className: "sectionTitle" },
-              React.createElement("h2", null, "Resultaat"),
-              React.createElement("span", { className: "badge" }, "Kosten + beste stap")
-            ),
+              { className: "cardWhite" },
 
-            React.createElement(
-              "div",
-              { className: "resultBig" },
+              React.createElement(
+                "div",
+                { className: "sectionTitle" },
+                React.createElement("h2", null, "Resultaat"),
+                React.createElement("span", { className: "pill" }, "Indicatief")
+              ),
+
+              React.createElement(
+                "div",
+                { className: "resultHeader" },
+                React.createElement(
+                  "div",
+                  null,
+                  React.createElement("div", { className: "money" }, moneyEUR(results.totalCost)),
+                  React.createElement("div", { className: "subMoney" }, `${moneyEUR(results.perMonth)} / maand`)
+                ),
+                React.createElement(
+                  "div",
+                  { className: "badge" },
+                  React.createElement("span", { style: { color: BRAND, fontWeight: 900 } }, "Postcode:"),
+                  React.createElement("span", null, cp || "—")
+                )
+              ),
+
+              React.createElement("div", { className: "hr" }),
+
+              // DPE slider (core)
               React.createElement(
                 "div",
                 null,
-                React.createElement("div", { className: "money" }, moneyEUR(baseResults.totalCost)),
-                React.createElement("div", { className: "subMoney" }, `${moneyEUR(baseResults.perMonth)} / maand`)
-              ),
-              React.createElement(
-                "div",
-                { className: "badge" },
-                React.createElement("span", { style: { color: BRAND, fontWeight: 900 } }, "Grootste stap:"),
-                React.createElement("span", null, improvement.label),
-                improvement.saving > 0 ? React.createElement("span", { style: { color: BRAND } }, `~${moneyEUR(improvement.saving)}/jr`) : null
-              )
-            ),
-
-            React.createElement("div", { className: "hr" }),
-
-            React.createElement(
-              "div",
-              { className: "scenarioGrid" },
-
-              React.createElement(
-                "div",
-                { className: "scBox" },
-                React.createElement("div", { className: "scTitle" }, "Baseline"),
-                React.createElement("div", { className: "scLine" }, React.createElement("span", null, "Warmtevraag"), React.createElement("span", null, `${round(baseResults.heatKwh)} kWh/jr`)),
-                React.createElement("div", { className: "scLine" }, React.createElement("span", null, "Warmte input"), React.createElement("span", null, `${round(baseResults.heatInputKwh)} kWh eq.`)),
-                React.createElement("div", { className: "scLine" }, React.createElement("span", null, "Elektra totaal"), React.createElement("span", null, `${round(baseResults.elecKwh)} kWh/jr`)),
-                React.createElement("div", { className: "scLine" }, React.createElement("span", null, "Totale kosten"), React.createElement("span", null, moneyEUR(baseResults.totalCost)))
-              ),
-
-              React.createElement(
-                "div",
-                { className: "scBox" },
-                React.createElement("div", { className: "scTitle" }, scenarioOn && scenarioResults ? "Scenario" : "Scenario (uit)"),
-                scenarioOn && scenarioResults
-                  ? React.createElement(
-                    React.Fragment,
-                    null,
-                    React.createElement("div", { className: "scLine" }, React.createElement("span", null, "Warmtevraag"), React.createElement("span", null, `${round(scenarioResults.heatKwh)} kWh/jr`)),
-                    React.createElement("div", { className: "scLine" }, React.createElement("span", null, "Warmte input"), React.createElement("span", null, `${round(scenarioResults.heatInputKwh)} kWh eq.`)),
-                    React.createElement("div", { className: "scLine" }, React.createElement("span", null, "Elektra totaal"), React.createElement("span", null, `${round(scenarioResults.elecKwh)} kWh/jr`)),
-                    React.createElement("div", { className: "scLine" }, React.createElement("span", null, "Totale kosten"), React.createElement("span", null, moneyEUR(scenarioResults.totalCost))),
-                    React.createElement("div", { className: "hr" }),
-                    React.createElement(
-                      "div",
-                      { className: "badge" },
-                      React.createElement("span", { style: { color: BRAND, fontWeight: 900 } }, "Verschil:"),
-                      React.createElement("span", null, moneyEUR(baseResults.totalCost - scenarioResults.totalCost)),
-                      React.createElement("span", { className: "badgeMuted" }, "per jaar")
-                    )
+                React.createElement(
+                  "div",
+                  { className: "sectionTitle", style: { marginBottom: 6 } },
+                  React.createElement("h2", null, "Waarschijnlijke DPE-positie"),
+                  React.createElement(
+                    "span",
+                    { className: "dpeChip" },
+                    "Indicatief: ",
+                    dpe.letter,
+                    " (", dpe.bandLow, "–", dpe.bandHigh, ")"
                   )
-                  : React.createElement(
+                ),
+
+                React.createElement(
+                  "div",
+                  { className: "dpeWrap" },
+                  React.createElement(
                     "div",
-                    { className: "note" },
-                    "Zet scenario aan om het ‘wow-effect’ te krijgen (sprong in kosten en verbruik)."
+                    { className: "dpeBar" },
+                    // segments
+                    React.createElement("div", { className: "dpeSeg", style: { background: "#2ecc71" } }),
+                    React.createElement("div", { className: "dpeSeg", style: { background: "#7bed9f" } }),
+                    React.createElement("div", { className: "dpeSeg", style: { background: "#f1c40f" } }),
+                    React.createElement("div", { className: "dpeSeg", style: { background: "#f39c12" } }),
+                    React.createElement("div", { className: "dpeSeg", style: { background: "#e67e22" } }),
+                    React.createElement("div", { className: "dpeSeg", style: { background: "#e74c3c" } }),
+                    React.createElement("div", { className: "dpeSeg", style: { background: "#b71c1c" } }),
+
+                    React.createElement("div", {
+                      className: "dpeBand",
+                      style: { left: dpeBand.left + "%", width: dpeBand.width + "%" }
+                    }),
+                    React.createElement("div", {
+                      className: "dpePointer",
+                      style: { left: dpePointerPct + "%" }
+                    })
+                  ),
+                  React.createElement(
+                    "div",
+                    { className: "dpeLabels" },
+                    React.createElement("span", null, "A"),
+                    React.createElement("span", null, "B"),
+                    React.createElement("span", null, "C"),
+                    React.createElement("span", null, "D"),
+                    React.createElement("span", null, "E"),
+                    React.createElement("span", null, "F"),
+                    React.createElement("span", null, "G")
+                  ),
+                  React.createElement(
+                    "div",
+                    { className: "dpeMeta" },
+                    React.createElement("span", { className: "badge badgeMuted" }, "Klimaatzone: ", zoneName),
+                    React.createElement("span", { className: "badge badgeMuted" }, "Model-intensiteit: ~", dpe.intensity, " kWh/m²/jr")
+                  ),
+                  React.createElement("div", { className: "help" },
+                    "Op basis van woningprofiel en regio (klimaatzone). Dit is context en vervangt geen officieel DPE-rapport."
                   )
-              )
-            ),
+                )
+              ),
 
-            React.createElement("div", { className: "hr" }),
+              React.createElement("div", { className: "hr" }),
 
-            React.createElement(
-              "div",
-              null,
-              React.createElement("h2", null, "DPE (later)"),
+              // Key numbers
               React.createElement(
                 "div",
-                { className: "note" },
-                "U kiest nu eerst context (adres/regio). In de volgende iteratie koppelen we: (1) DPE-context per postcode (benchmark) en (2) een ‘prévisionnel’ bandbreedte op basis van uw model. Dit blijft indicatief en wordt duidelijk zo gelabeld."
+                { className: "sectionTitle", style: { marginBottom: 6 } },
+                React.createElement("h2", null, "Kerncijfers"),
+                React.createElement("span", { className: "pill" }, "kWh & €")
+              ),
+              React.createElement("div", { className: "help" }, `Warmtevraag (indicatief): ${round(results.heatKwh)} kWh/jaar · Elektra totaal: ${round(results.elecKwh)} kWh/jaar.`),
+
+              React.createElement("div", { className: "hr" }),
+
+              // Advice
+              React.createElement(
+                "div",
+                { className: "sectionTitle", style: { marginBottom: 6 } },
+                React.createElement("h2", null, "Adviezen"),
+                React.createElement("span", { className: "pill" }, "2 sporen")
+              ),
+
+              React.createElement(
+                "div",
+                { className: "adviceGrid" },
+                React.createElement(
+                  "div",
+                  { className: "adviceBox" },
+                  React.createElement("div", { className: "adviceTitle" }, "Besparingskansen"),
+                  React.createElement("div", { className: "adviceSub" }, "Quick wins"),
+                  React.createElement(
+                    "ul",
+                    { className: "ul" },
+                    advice.quick.map((x, i) => React.createElement("li", { key: i }, x))
+                  ),
+                  React.createElement("div", { className: "adviceSub" }, "Structurele kansen"),
+                  React.createElement(
+                    "ul",
+                    { className: "ul" },
+                    advice.structural.map((x, i) => React.createElement("li", { key: i }, x))
+                  )
+                ),
+                React.createElement(
+                  "div",
+                  { className: "adviceBox" },
+                  React.createElement("div", { className: "adviceTitle" }, "DPE-optimalisering"),
+                  React.createElement(
+                    "ul",
+                    { className: "ul" },
+                    advice.dpe.map((x, i) => React.createElement("li", { key: i }, x))
+                  )
+                )
+              ),
+
+              React.createElement("div", { className: "hr" }),
+
+              // Grondslagen accordion + copy
+              React.createElement(
+                "button",
+                {
+                  className: "accordionBtn",
+                  onClick: () => setShowGrounds(!showGrounds),
+                  "aria-expanded": showGrounds ? "true" : "false"
+                },
+                React.createElement("span", null, "Grondslagen (invoer, waarden, logica)"),
+                React.createElement("span", null, showGrounds ? "–" : "+")
+              ),
+
+              showGrounds ? React.createElement(
+                "div",
+                { className: "accordionBody" },
+
+                React.createElement(
+                  "div",
+                  { className: "btnRow", style: { marginTop: 0 } },
+                  React.createElement("button", { className: "btn", onClick: onCopyReport }, "Kopieer rapport"),
+                  React.createElement("button", { className: "btn btnSoft", onClick: downloadTxt }, "Download .txt")
+                ),
+                copyMsg ? React.createElement("div", { className: "neonText", style: { marginTop: 8 } }, copyMsg) : null,
+
+                React.createElement("div", { style: { marginTop: 12 } }),
+
+                React.createElement("div", { className: "neonRow" },
+                  React.createElement("div", { className: "neonLabel neonG" }, "GEBRUIKTE VARIABELEN"),
+                  React.createElement("div", { className: "neonText" },
+                    `Postcode: ${cp || "—"} · Klimaatzone: ${zoneName} · m²: ${inputs.m2} · Bouwperiode: ${BUILD.find(b=>b.key===buildKey)?.label || "—"} · Aanwezigheid: ${PRESENCE.find(p=>p.key===presenceKey)?.label || "—"} · Verwarming: ${HEAT.find(h=>h.key===heatKey)?.label || "—"} · Elektra-slider: ${inputs.sliderKwh} kWh/jaar`
+                  ),
+
+                  React.createElement("div", { className: "neonLabel neonY" }, "BEREKENING (SAMENGEVAT)"),
+                  React.createElement("div", { className: "neonText" },
+                    "1) Postcode → klimaatzone (klimaat beïnvloedt warmtevraag). 2) Warmtevraag (indicatief) op basis van m² × graaddagen × bouwperiodefactor × aanwezigheid. 3) Verwarming zet warmtevraag om naar energie-input (SCOP/η) en kosten (standaard energieprijzen). 4) DPE-positie is een contextuele indicatie (positie + bandbreedte), geen officieel label."
+                  ),
+
+                  React.createElement("div", { className: "neonLabel neonO" }, "WAARDEN & UITKOMSTEN"),
+                  React.createElement("div", { className: "codeLine" },
+                    `Kosten/jaar: ${moneyEUR(results.totalCost)}\nPer maand: ${moneyEUR(results.perMonth)}\nWarmtevraag: ${round(results.heatKwh)} kWh/jaar\nElektra totaal: ${round(results.elecKwh)} kWh/jaar\nDPE (indicatief): ${dpe.letter} (band: ${dpe.bandLow}-${dpe.bandHigh})\n`
+                  ),
+
+                  React.createElement("div", { className: "neonText", style: { marginTop: 10 } },
+                    "Disclaimer: dit hulpmiddel is bedoeld voor inzicht en vergelijking en vervangt geen gecertificeerde DPE-audit of energie-audit."
+                  )
+                )
+              ) : null,
+
+              React.createElement("div", { className: "footerNote" },
+                "Oriëntatietool — geen gecertificeerde DPE-audit. Officiële audits vereisen gevalideerde software en een gecertificeerde expert."
               )
             )
-          )
-        ),
-
-        React.createElement(
-          "div",
-          { style: { marginTop: 14 } },
-          React.createElement(
-            "small",
-            null,
-            "Bron adreszoeker: Base Adresse Nationale (BAN). De berekening is een oriëntatiemodel (koper/eigenaar) en vervangt geen officieel DPE of audit."
           )
         )
       )
